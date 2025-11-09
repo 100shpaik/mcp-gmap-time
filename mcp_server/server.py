@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import os
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from datetime import datetime
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 
 from dotenv import load_dotenv
 
@@ -73,6 +75,28 @@ def static_map(origin_lat: float, origin_lng: float, dest_lat: float, dest_lng: 
     return {"url": url}
 
 
+def fetch_single_eta_parallel(
+    origin: LatLng, dest: LatLng, dt: datetime, traffic_model: str, max_retries: int = 3
+) -> Tuple[datetime, str, Optional[float]]:
+    """Fetch a single ETA for parallel execution with retry logic."""
+    epoch = int(dt.timestamp())
+
+    for attempt in range(max_retries):
+        try:
+            duration_sec = directions_duration_in_traffic(origin, dest, epoch, traffic_model)
+            duration_min = round(duration_sec / 60, 1)
+            return (dt, traffic_model, duration_min)
+        except Exception as e:
+            if attempt < max_retries - 1:
+                wait_time = (attempt + 1) * 0.5
+                time.sleep(wait_time)
+            else:
+                # Final attempt failed
+                return (dt, traffic_model, None)
+
+    return (dt, traffic_model, None)
+
+
 @mcp.tool()
 def eta_series(
     origin_lat: float,
@@ -84,9 +108,9 @@ def eta_series(
     end: str,
     interval_minutes: int = 15,
     tz: str = "America/Los_Angeles",
-    include_plot: bool = False,
+    include_plot: bool = True,
 ) -> dict:
-    """Compute optimistic/pessimistic ETAs across a time grid for the given date.
+    """Compute optimistic/pessimistic ETAs across a time grid for the given date using PARALLEL requests.
 
     Returns dict with ISO8601 times and durations (minutes) for two traffic models.
 
@@ -100,39 +124,70 @@ def eta_series(
         end: End time in HH:MM format
         interval_minutes: Minutes between samples (default: 15)
         tz: Timezone string (default: "America/Los_Angeles")
-        include_plot: If True, generate matplotlib PNG as base64 (for Claude chat).
-                     If False, return only data (for Claude Code to render ASCII).
+        include_plot: If True, generate matplotlib PNG as base64 (default: True for Claude Desktop).
     """
     origin = LatLng(origin_lat, origin_lng)
     dest = LatLng(dest_lat, dest_lng)
     dts = minute_grid(date, start, end, interval_minutes, tz)
 
+    # Create all tasks (2 per time point: optimistic + pessimistic)
+    tasks = []
+    for dt in dts:
+        tasks.append((origin, dest, dt, "optimistic"))
+        tasks.append((origin, dest, dt, "pessimistic"))
+
+    results = {}
+    failed_tasks = tasks.copy()
+    retry_round = 0
+    max_retry_rounds = 3
+
+    # Retry loop with parallel processing
+    while failed_tasks and retry_round < max_retry_rounds:
+        retry_round += 1
+        current_workers = 30 if retry_round == 1 else 10
+
+        with ThreadPoolExecutor(max_workers=current_workers) as executor:
+            future_to_args = {
+                executor.submit(fetch_single_eta_parallel, *task_args): task_args
+                for task_args in failed_tasks
+            }
+
+            new_failed_tasks = []
+            for future in as_completed(future_to_args):
+                dt, traffic_model, duration_min = future.result()
+                if dt not in results:
+                    results[dt] = {}
+                if duration_min is not None:
+                    results[dt][traffic_model] = duration_min
+                else:
+                    new_failed_tasks.append(future_to_args[future])
+
+            failed_tasks = new_failed_tasks
+
+    # Build output arrays filtering only complete data points
     rows: List[dict] = []
     times = []
     opt_min = []
     pes_min = []
 
-    for i, dt in enumerate(dts, start=1):
-        epoch = int(dt.timestamp())
-        optimistic_sec = directions_duration_in_traffic(origin, dest, epoch, "optimistic")
-        pessimistic_sec = directions_duration_in_traffic(origin, dest, epoch, "pessimistic")
+    sorted_times = sorted(results.keys())
+    for dt in sorted_times:
+        opt = results[dt].get("optimistic")
+        pes = results[dt].get("pessimistic")
 
-        opt_val = round(optimistic_sec / 60, 1)
-        pes_val = round(pessimistic_sec / 60, 1)
-
-        rows.append(
-            {
-                "departure": dt.isoformat(),
-                "optimistic_min": opt_val,
-                "pessimistic_min": pes_val,
-                "average_min": round((opt_val + pes_val) / 2, 1),
-            }
-        )
-        times.append(dt.strftime("%H:%M"))
-        opt_min.append(opt_val)
-        pes_min.append(pes_val)
-
-        sleep_backoff(i)
+        # Only include if both models succeeded
+        if opt is not None and pes is not None:
+            rows.append(
+                {
+                    "departure": dt.isoformat(),
+                    "optimistic_min": opt,
+                    "pessimistic_min": pes,
+                    "average_min": round((opt + pes) / 2, 1),
+                }
+            )
+            times.append(dt.strftime("%H:%M"))
+            opt_min.append(opt)
+            pes_min.append(pes)
 
     # Calculate key insights
     avg_min = [(o + p) / 2 for o, p in zip(opt_min, pes_min)]
