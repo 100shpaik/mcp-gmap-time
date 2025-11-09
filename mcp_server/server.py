@@ -27,23 +27,27 @@ mcp = FastMCP(
         "Tools for verifying locations, computing traffic-aware ETAs over a time grid, "
         "and generating static maps for origin/destination. Uses Google Maps Platform.\n\n"
         "IMPORTANT USAGE PATTERN:\n"
-        "1. When user asks about traffic/drive times, respond QUICKLY:\n"
-        "   - Show simple text plot\n"
+        "1. When user asks about traffic/drive times:\n"
+        "   - Call eta_series with include_plot=False (default)\n"
+        "   - Describe the traffic pattern from the data\n"
         "   - Give best/worst times (consider human sleep/work schedules)\n"
-        "   - Provide one clear recommendation\n"
-        "   - Ask if they want more detailed analysis\n\n"
-        "2. Provide detailed analysis ONLY if:\n"
-        "   - User explicitly asks for it\n"
-        "   - User has specific constraints (flight time, meeting, etc.)\n"
-        "   - User says 'yes' to wanting more details\n\n"
-        "3. Consider realistic human constraints:\n"
+        "   - Provide one clear recommendation\n\n"
+        "2. Visual plots:\n"
+        "   - DO NOT use include_plot=True unless user specifically asks for a visual/image/plot\n"
+        "   - Base64 PNG is very large and fills context window\n"
+        "   - Instead, describe the data patterns clearly\n\n"
+        "3. Time windows:\n"
+        "   - For 24-hour queries: Use start='00:00' end='23:59'\n"
+        "   - Tool now uses parallel processing - full 24 hours completes in ~5 seconds\n"
+        "   - No need to reduce time window for performance\n\n"
+        "4. Consider realistic human constraints:\n"
         "   - Don't recommend 12 AM-5 AM unless user specifically mentions it\n"
         "   - Consider work hours, sleep needs, meal times\n"
         "   - Give time ranges, not exact times\n\n"
-        "4. Speed requirements:\n"
-        "   - Initial response: < 10 seconds total\n"
-        "   - Be concise first, detailed on request\n\n"
-        "See CLAUDE_CODE_USAGE.md for detailed behavior guidelines."
+        "5. Response format:\n"
+        "   - Be concise and actionable\n"
+        "   - Mention best times, worst times, time savings\n"
+        "   - Give specific recommendations based on user's scenario"
     ),
 )
 
@@ -108,11 +112,14 @@ def eta_series(
     end: str,
     interval_minutes: int = 15,
     tz: str = "America/Los_Angeles",
-    include_plot: bool = True,
+    include_plot: bool = False,
 ) -> dict:
     """Compute optimistic/pessimistic ETAs across a time grid for the given date using PARALLEL requests.
 
     Returns dict with ISO8601 times and durations (minutes) for two traffic models.
+
+    NOTE: The plot (base64 PNG) is VERY LARGE and can fill the context window. Only request it
+    when the user specifically asks for a visual plot. Otherwise, use the data to describe findings.
 
     Args:
         origin_lat: Origin latitude
@@ -124,7 +131,7 @@ def eta_series(
         end: End time in HH:MM format
         interval_minutes: Minutes between samples (default: 15)
         tz: Timezone string (default: "America/Los_Angeles")
-        include_plot: If True, generate matplotlib PNG as base64 (default: True for Claude Desktop).
+        include_plot: If True, generate matplotlib PNG as base64. WARNING: Very large, use sparingly!
     """
     origin = LatLng(origin_lat, origin_lng)
     dest = LatLng(dest_lat, dest_lng)
