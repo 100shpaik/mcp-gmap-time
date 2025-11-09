@@ -29,13 +29,17 @@ mcp = FastMCP(
         "IMPORTANT USAGE PATTERN:\n"
         "1. When user asks about traffic/drive times:\n"
         "   - Call eta_series with include_plot=False (default)\n"
-        "   - Describe the traffic pattern from the data\n"
+        "   - ALWAYS show the text_plot from the response (it's a visual ASCII plot)\n"
         "   - Give best/worst times (consider human sleep/work schedules)\n"
         "   - Provide one clear recommendation\n\n"
-        "2. Visual plots:\n"
-        "   - DO NOT use include_plot=True unless user specifically asks for a visual/image/plot\n"
+        "2. Text plot visualization:\n"
+        "   - The text_plot field contains an ASCII visualization showing all three lines\n"
+        "   - Always display it in a code block for proper formatting\n"
+        "   - It uses: + (optimistic), o (pessimistic), * (average), B (best), W (worst)\n\n"
+        "3. Image plots:\n"
+        "   - DO NOT use include_plot=True unless user specifically asks for a PNG image\n"
         "   - Base64 PNG is very large and fills context window\n"
-        "   - Instead, describe the data patterns clearly\n\n"
+        "   - The text_plot is sufficient for most users\n\n"
         "3. Time windows:\n"
         "   - For 24-hour queries: Use start='00:00' end='23:59'\n"
         "   - Tool now uses parallel processing - full 24 hours completes in ~5 seconds\n"
@@ -99,6 +103,79 @@ def fetch_single_eta_parallel(
                 return (dt, traffic_model, None)
 
     return (dt, traffic_model, None)
+
+
+def generate_simple_text_plot(times, opt_min, pes_min, avg_min, min_idx, max_idx, interval):
+    """Generate a simple text plot using +, o, * characters"""
+
+    min_val = min(min(opt_min), min(pes_min))
+    max_val = max(max(opt_min), max(pes_min))
+
+    height = 20
+    width = len(times)
+
+    def scale(val):
+        return int((val - min_val) / (max_val - min_val) * (height - 1))
+
+    # Create grid
+    grid = [[' ' for _ in range(width)] for _ in range(height)]
+
+    # Plot lines
+    for i in range(width):
+        opt_y = height - 1 - scale(opt_min[i])
+        pes_y = height - 1 - scale(pes_min[i])
+        avg_y = height - 1 - scale(avg_min[i])
+
+        if grid[pes_y][i] == ' ':
+            grid[pes_y][i] = 'o'
+        if grid[opt_y][i] == ' ':
+            grid[opt_y][i] = '+'
+        if grid[avg_y][i] == ' ':
+            grid[avg_y][i] = '*'
+        elif grid[avg_y][i] in ['+', 'o']:
+            grid[avg_y][i] = '*'
+
+    # Mark best/worst
+    min_y = height - 1 - scale(avg_min[min_idx])
+    max_y = height - 1 - scale(avg_min[max_idx])
+    grid[min_y][min_idx] = 'B'
+    grid[max_y][max_idx] = 'W'
+
+    # Build plot string
+    lines = []
+    for i in range(height):
+        val = max_val - (i / (height - 1)) * (max_val - min_val)
+        lines.append(f"{int(val):3d} min | {''.join(grid[i])}")
+
+    lines.append(f"        +{'-' * width}")
+
+    # X-axis with proper spacing
+    intervals_per_hour = 60 // interval
+    x_axis = "          "
+    prev_hour_len = 0
+
+    for i, t in enumerate(times):
+        hour, minute = t.split(':')
+        if minute == '00':
+            hour_num = int(hour)
+            hour_str = str(hour_num)
+
+            if i == 0:
+                spacing = 0
+            else:
+                spacing = intervals_per_hour - prev_hour_len
+
+            x_axis += " " * spacing + hour_str
+            prev_hour_len = len(hour_str)
+
+    lines.append(x_axis)
+    lines.append("          Hour of Day")
+    lines.append("")
+    lines.append("LEGEND:")
+    lines.append("  + = Optimistic  |  o = Pessimistic  |  * = Average")
+    lines.append(f"  B = Best ({times[min_idx]}, {avg_min[min_idx]:.1f} min)  |  W = Worst ({times[max_idx]}, {avg_min[max_idx]:.1f} min)")
+
+    return "\n".join(lines)
 
 
 @mcp.tool()
@@ -217,7 +294,8 @@ def eta_series(
                 "pessimistic_min": pes_min[max_idx],
             },
             "time_difference_min": round(avg_min[max_idx] - avg_min[min_idx], 1),
-        }
+        },
+        "text_plot": generate_simple_text_plot(times, opt_min, pes_min, avg_min, min_idx, max_idx, interval_minutes)
     }
 
     # Generate plot if requested (for Claude chat)
